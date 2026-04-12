@@ -9,7 +9,7 @@ from typing import Optional
 import structlog
 
 from paperbanana.agents.base import BaseAgent
-from paperbanana.core.types import CritiqueResult, DiagramType
+from paperbanana.core.types import AxisScore, CritiqueResult, CritiqueRubric, DiagramType
 from paperbanana.core.utils import load_image
 from paperbanana.providers.base import VLMProvider
 
@@ -113,9 +113,33 @@ class CriticAgent(BaseAgent):
         """Parse the VLM response into a CritiqueResult."""
         try:
             data = json.loads(response)
+
+            # Parse structured rubric if present (Harness Design 4-axis scoring)
+            rubric = None
+            rubric_data = data.get("rubric")
+            if rubric_data and isinstance(rubric_data, dict):
+                try:
+                    rubric = CritiqueRubric(
+                        design_quality=AxisScore(**rubric_data["design_quality"])
+                        if "design_quality" in rubric_data
+                        else None,
+                        originality=AxisScore(**rubric_data["originality"])
+                        if "originality" in rubric_data
+                        else None,
+                        craft=AxisScore(**rubric_data["craft"])
+                        if "craft" in rubric_data
+                        else None,
+                        functionality=AxisScore(**rubric_data["functionality"])
+                        if "functionality" in rubric_data
+                        else None,
+                    )
+                except (KeyError, TypeError, ValueError):
+                    logger.debug("Rubric parsing failed, using suggestions only")
+
             return CritiqueResult(
                 critic_suggestions=data.get("critic_suggestions", []),
                 revised_description=data.get("revised_description"),
+                rubric=rubric,
             )
         except (json.JSONDecodeError, KeyError) as e:
             logger.warning("Failed to parse critic response", error=str(e))

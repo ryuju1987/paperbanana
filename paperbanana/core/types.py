@@ -96,12 +96,61 @@ class ReferenceExample(BaseModel):
     structure_hints: Optional[dict[str, Any] | list[Any] | str] = None
 
 
+class AxisScore(BaseModel):
+    """Structured score for a single evaluation axis (Harness Design rubric)."""
+
+    score: float = Field(ge=1, le=10, description="Score from 1-10")
+    feedback: str = Field(default="", description="Specific feedback for this axis")
+
+
+class CritiqueRubric(BaseModel):
+    """Structured 4-axis evaluation rubric inspired by Anthropic's Harness Design.
+
+    The four axes are adapted from the blog post's frontend design criteria:
+    - Design quality: coherence across colors, typography, layout, and mood
+    - Originality: custom decisions over templates and AI-generated patterns
+    - Craft: typography hierarchy, spacing, color harmony, contrast
+    - Functionality: information clarity and task completion
+    """
+
+    design_quality: Optional[AxisScore] = Field(
+        default=None,
+        description="Coherence of colors, typography, layout, and visual mood",
+    )
+    originality: Optional[AxisScore] = Field(
+        default=None,
+        description="Custom design decisions vs generic templates/AI patterns",
+    )
+    craft: Optional[AxisScore] = Field(
+        default=None,
+        description="Typography hierarchy, spacing, color harmony, contrast",
+    )
+    functionality: Optional[AxisScore] = Field(
+        default=None,
+        description="Information clarity and communicative effectiveness",
+    )
+
+    @property
+    def average_score(self) -> float | None:
+        """Average across all non-None axes."""
+        scores = [
+            axis.score
+            for axis in [self.design_quality, self.originality, self.craft, self.functionality]
+            if axis is not None
+        ]
+        return sum(scores) / len(scores) if scores else None
+
+
 class CritiqueResult(BaseModel):
     """Output from the Critic agent."""
 
     critic_suggestions: list[str] = Field(default_factory=list)
     revised_description: Optional[str] = Field(
         default=None, description="Revised description if revision needed"
+    )
+    rubric: Optional[CritiqueRubric] = Field(
+        default=None,
+        description="Structured 4-axis evaluation scores (Harness Design)",
     )
 
     @property
@@ -111,7 +160,10 @@ class CritiqueResult(BaseModel):
     @property
     def summary(self) -> str:
         if not self.critic_suggestions:
-            return "No issues found. Image is publication-ready."
+            score_info = ""
+            if self.rubric and self.rubric.average_score is not None:
+                score_info = f" (score: {self.rubric.average_score:.1f}/10)"
+            return f"No issues found. Image is publication-ready.{score_info}"
         return "; ".join(self.critic_suggestions[:3])
 
 

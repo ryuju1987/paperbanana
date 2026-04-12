@@ -34,11 +34,38 @@ You are also provided with the 'Detailed Description' corresponding to the curre
 Provide your response strictly in the following JSON format:
 {{
     "critic_suggestions": ["specific actionable suggestion 1", "specific actionable suggestion 2"],
-    "revised_description": "The complete revised description incorporating all suggested fixes. If no revision is needed, set to null."
+    "revised_description": "The complete revised description incorporating all suggested fixes. If no revision is needed, set to null.",
+    "rubric": {{
+        "design_quality": {{
+            "score": 8,
+            "feedback": "Coherent color scheme, appropriate chart type for data"
+        }},
+        "originality": {{
+            "score": 7,
+            "feedback": "Clean custom design, avoids default matplotlib look"
+        }},
+        "craft": {{
+            "score": 8,
+            "feedback": "Good axis labels, consistent fonts, proper spacing"
+        }},
+        "functionality": {{
+            "score": 9,
+            "feedback": "Data is accurately represented and easy to compare"
+        }}
+    }}
 }}
 
-If the plot is publication-ready with no issues, return:
+### Rubric Scoring Guidelines (1-10 scale):
+- **design_quality**: Coherent color palette, appropriate chart type selection, visual unity
+- **originality**: Custom styling beyond default library output, thoughtful design choices
+- **craft**: Axis label precision, font consistency, gridline subtlety, spacing, contrast
+- **functionality**: Data accuracy, readability, comparison clarity, statistical message
+
+Score 9-10: Publication-ready. 7-8: Good with minor issues. 5-6: Needs revision. 1-4: Major rewrite.
+
+If the plot is publication-ready with no issues, return empty suggestions with high rubric scores:
 {{
     "critic_suggestions": [],
-    "revised_description": null
+    "revised_description": null,
+    "rubric": {{ "design_quality": {{"score": 9, "feedback": "..."}}, ... }}
 }}

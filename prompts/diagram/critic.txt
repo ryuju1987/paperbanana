@@ -32,11 +32,38 @@ Your Description should primarily be modifications based on the original descrip
 Provide your response strictly in the following JSON format:
 {{
     "critic_suggestions": ["specific actionable suggestion 1", "specific actionable suggestion 2"],
-    "revised_description": "The complete revised description incorporating all suggested fixes. If no revision is needed, set to null."
+    "revised_description": "The complete revised description incorporating all suggested fixes. If no revision is needed, set to null.",
+    "rubric": {{
+        "design_quality": {{
+            "score": 8,
+            "feedback": "Coherent color scheme and layout, minor alignment issues"
+        }},
+        "originality": {{
+            "score": 7,
+            "feedback": "Custom layout decisions, but arrow styles are generic"
+        }},
+        "craft": {{
+            "score": 8,
+            "feedback": "Good typography hierarchy, consistent spacing"
+        }},
+        "functionality": {{
+            "score": 9,
+            "feedback": "Information flow is clear, methodology is accurately conveyed"
+        }}
+    }}
 }}
 
-If the image is publication-ready with no issues, return:
+### Rubric Scoring Guidelines (1-10 scale):
+- **design_quality**: Coherence across colors, typography, layout, and visual mood. Does it look like a unified design?
+- **originality**: Custom design decisions over generic templates. Does it avoid cookie-cutter AI diagram patterns?
+- **craft**: Typography hierarchy, spacing precision, color harmony, contrast ratios. Is the execution polished?
+- **functionality**: Information clarity and communicative effectiveness. Does it convey the methodology accurately?
+
+Score 9-10: Publication-ready. 7-8: Good with minor issues. 5-6: Needs revision. 1-4: Major rewrite.
+
+If the image is publication-ready with no issues, return empty suggestions with high rubric scores:
 {{
     "critic_suggestions": [],
-    "revised_description": null
+    "revised_description": null,
+    "rubric": {{ "design_quality": {{"score": 9, "feedback": "..."}}, ... }}
 }}
