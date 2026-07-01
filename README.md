@@ -86,7 +86,7 @@ cp .env.example .env
 #
 # Optional Gemini overrides:
 #   GOOGLE_BASE_URL=https://your-gemini-proxy.example.com
-#   GOOGLE_VLM_MODEL=gemini-2.0-flash
+#   GOOGLE_VLM_MODEL=gemini-3-flash-preview
 #   GOOGLE_IMAGE_MODEL=gemini-3-pro-image-preview
 ```
 
@@ -158,7 +158,7 @@ PaperBanana supports multiple VLM and image generation providers:
 |-----------|----------|-------|-------|
 | VLM (planning, critique) | OpenAI | `gpt-5.2` | Default |
 | Image Generation | OpenAI | `gpt-image-1.5` | Default |
-| VLM | Google Gemini | `gemini-2.0-flash` | Free tier |
+| VLM | Google Gemini | `gemini-3-flash-preview` | Free tier |
 | Image Generation | Google Gemini | `gemini-3-pro-image-preview` | Free tier |
 | VLM / Image | OpenRouter | Any supported model | Flexible routing |
 
@@ -502,7 +502,7 @@ OPENAI_IMAGE_MODEL=gpt-image-1.5              # override model
 # Google Gemini (alternative, free)
 GOOGLE_API_KEY=your-key
 GOOGLE_BASE_URL=                            # optional custom Gemini-compatible endpoint
-GOOGLE_VLM_MODEL=gemini-2.0-flash          # override Gemini VLM model
+GOOGLE_VLM_MODEL=gemini-3-flash-preview          # override Gemini VLM model
 GOOGLE_IMAGE_MODEL=gemini-3-pro-image-preview  # override Gemini image model
 ```
 

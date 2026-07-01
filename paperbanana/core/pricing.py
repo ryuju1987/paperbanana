@@ -13,7 +13,8 @@ logger = structlog.get_logger()
 # (provider, model_prefix) -> {"input_per_1k": USD, "output_per_1k": USD}
 VLM_PRICING: dict[tuple[str, str], dict[str, float]] = {
     # Google Gemini — free tier
-    ("gemini", "gemini-2.0-flash"): {"input_per_1k": 0.0, "output_per_1k": 0.0},
+    ("gemini", "gemini-2.0-flash"): {"input_per_1k": 0.0, "output_per_1k": 0.0},  # retired 2026-06, kept for historical cost logs
+    ("gemini", "gemini-3-flash-preview"): {"input_per_1k": 0.0, "output_per_1k": 0.0},
     ("gemini", "gemini-2.5-flash"): {"input_per_1k": 0.00015, "output_per_1k": 0.0006},
     ("gemini", "gemini-2.5-pro"): {"input_per_1k": 0.00125, "output_per_1k": 0.01},
     ("gemini", "gemini-3-pro"): {"input_per_1k": 0.00125, "output_per_1k": 0.005},
