@@ -11,6 +11,25 @@ from typer.testing import CliRunner
 from paperbanana.cli import app
 
 runner = CliRunner()
+HELP_TERMINAL_WIDTH = 200
+HELP_ENV = {
+    "COLUMNS": str(HELP_TERMINAL_WIDTH),
+    "NO_COLOR": "1",
+    "TERM": "dumb",
+}
+
+
+def invoke_help(*args: str) -> str:
+    """Render CLI help in a stable plain-text format for assertions."""
+    result = runner.invoke(
+        app,
+        [*args, "--help"],
+        terminal_width=HELP_TERMINAL_WIDTH,
+        color=False,
+        env=HELP_ENV,
+    )
+    assert result.exit_code == 0
+    return result.output
 
 
 def test_generate_dry_run_valid_inputs():
@@ -68,6 +87,198 @@ def test_generate_accepts_progress_json_flag():
         assert result.exit_code == 0
     finally:
         Path(input_path).unlink(missing_ok=True)
+
+
+def test_orchestrate_dry_run_writes_plan(tmp_path):
+    """orchestrate --dry-run should emit a package plan on disk."""
+    paper_path = tmp_path / "paper.txt"
+    paper_path.write_text(
+        "\n".join(
+            [
+                "A Very Good Paper Title",
+                "",
+                "1 Introduction",
+                "We introduce a new system.",
+                "",
+                "2 Method",
+                "Our method has encoder, retriever, and critic modules.",
+                "",
+                "3 Experiments",
+                "We compare against strong baselines.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "orchestrate",
+            "--paper",
+            str(paper_path),
+            "--output-dir",
+            str(tmp_path),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Dry run complete" in result.output
+
+    plans = list(tmp_path.glob("orchestrate_*/orchestration_plan.json"))
+    assert len(plans) == 1
+    payload = json.loads(plans[0].read_text(encoding="utf-8"))
+    assert payload["paper_title"] == "A Very Good Paper Title"
+    assert len(payload["methodology_items"]) >= 1
+
+
+def test_orchestrate_generates_package_with_mocked_pipeline(tmp_path, monkeypatch):
+    """orchestrate writes package manifest + latex artifacts in execution mode."""
+    paper_path = tmp_path / "paper.txt"
+    paper_path.write_text(
+        "\n".join(
+            [
+                "Paper Title",
+                "",
+                "1 Method Overview",
+                "Our framework has three blocks.",
+                "",
+                "2 Training Pipeline",
+                "We optimize with curriculum and regularization.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    call_state = {"n": 0}
+
+    class _FakePipeline:
+        def __init__(self, settings=None, **kwargs):
+            self.settings = settings
+            self.run_id = "run_fake"
+
+        async def generate(self, gen_input):
+            from paperbanana.core.types import GenerationOutput
+
+            call_state["n"] += 1
+            out = tmp_path / f"fake_{call_state['n']}.png"
+            out.write_bytes(b"fake-png")
+            return GenerationOutput(
+                image_path=str(out),
+                description="desc",
+                iterations=[],
+                metadata={"run_id": f"run_{call_state['n']}"},
+            )
+
+    monkeypatch.setattr("paperbanana.core.pipeline.PaperBananaPipeline", _FakePipeline)
+
+    result = runner.invoke(
+        app,
+        [
+            "orchestrate",
+            "--paper",
+            str(paper_path),
+            "--output-dir",
+            str(tmp_path),
+            "--max-method-figures",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Orchestration complete" in result.output
+
+    packages = list(tmp_path.glob("orchestrate_*/figure_package.json"))
+    assert len(packages) == 1
+    package = json.loads(packages[0].read_text(encoding="utf-8"))
+    assert package["planned_methodology_items"] >= 1
+    assert len(package["generated_items"]) >= 1
+
+    package_dir = packages[0].parent
+    assert (package_dir / "figures.tex").exists()
+    assert (package_dir / "captions.md").exists()
+
+
+def test_orchestrate_resume_retry_failed_item(tmp_path, monkeypatch):
+    """resume-orchestrate retries failed tasks and updates package report."""
+    paper_path = tmp_path / "paper.txt"
+    paper_path.write_text(
+        "\n".join(
+            [
+                "Paper Title",
+                "",
+                "1 Method",
+                "A single section for one method figure.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    call_state = {"n": 0}
+
+    class _FlakyPipeline:
+        def __init__(self, settings=None, **kwargs):
+            self.settings = settings
+            self.run_id = "run_flaky"
+
+        async def generate(self, gen_input):
+            from paperbanana.core.types import GenerationOutput
+
+            call_state["n"] += 1
+            if call_state["n"] == 1:
+                raise RuntimeError("simulated generation failure")
+            out = tmp_path / "flaky_success.png"
+            out.write_bytes(b"ok")
+            return GenerationOutput(
+                image_path=str(out),
+                description="desc",
+                iterations=[],
+                metadata={"run_id": "run_success"},
+            )
+
+    monkeypatch.setattr("paperbanana.core.pipeline.PaperBananaPipeline", _FlakyPipeline)
+
+    first = runner.invoke(
+        app,
+        [
+            "orchestrate",
+            "--paper",
+            str(paper_path),
+            "--output-dir",
+            str(tmp_path),
+            "--max-method-figures",
+            "1",
+            "--max-plot-figures",
+            "0",
+        ],
+    )
+    assert first.exit_code == 1
+    assert "failed" in first.output.lower()
+
+    runs = list(tmp_path.glob("orchestrate_*"))
+    assert len(runs) == 1
+    orchestrate_dir = runs[0]
+    checkpoint_path = orchestrate_dir / "orchestration_checkpoint.json"
+    assert checkpoint_path.exists()
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    statuses = [x["status"] for x in checkpoint["items"].values()]
+    assert statuses == ["failed"]
+
+    second = runner.invoke(
+        app,
+        [
+            "orchestrate",
+            "--resume-orchestrate",
+            str(orchestrate_dir),
+            "--retry-failed",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+    assert second.exit_code == 0
+    assert "Orchestration complete" in second.output
+
+    package = json.loads((orchestrate_dir / "figure_package.json").read_text(encoding="utf-8"))
+    assert len(package["generated_items"]) == 1
+    assert package["failures"] == []
 
 
 def test_sweep_dry_run_writes_report(tmp_path):
@@ -219,6 +430,158 @@ def test_sweep_writes_report_with_mocked_pipeline(tmp_path, monkeypatch):
     assert len(ranked) == 2
     assert ranked[0]["variant_id"] == "variant_001"
     assert ranked[0]["quality_proxy_score"] > ranked[1]["quality_proxy_score"]
+
+
+def test_generate_rejects_unknown_reference_category():
+    """--reference-category exits 1 with a helpful error for unknown values."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("Sample methodology text for testing.")
+        input_path = f.name
+
+    try:
+        result = runner.invoke(
+            app,
+            [
+                "generate",
+                "--input",
+                input_path,
+                "--caption",
+                "test",
+                "--dry-run",
+                "--reference-category",
+                "bogus_category",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Unknown reference category" in result.output
+        assert "bogus_category" in result.output
+        # Error should list valid categories to help the user recover.
+        assert "vision_perception" in result.output
+        assert "nlp_language" in result.output
+    finally:
+        Path(input_path).unlink(missing_ok=True)
+
+
+def test_generate_rejects_mixed_valid_and_invalid_reference_categories():
+    """One invalid token in a comma-separated list fails validation."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("Sample methodology text for testing.")
+        input_path = f.name
+
+    try:
+        result = runner.invoke(
+            app,
+            [
+                "generate",
+                "--input",
+                input_path,
+                "--caption",
+                "test",
+                "--dry-run",
+                "--reference-category",
+                "vision_perception,not_a_category",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "not_a_category" in result.output
+        assert "Unknown reference category" in result.output
+    finally:
+        Path(input_path).unlink(missing_ok=True)
+
+
+def test_generate_accepts_valid_reference_category():
+    """Single valid category passes validation and reaches dry-run output."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("Sample methodology text for testing.")
+        input_path = f.name
+
+    try:
+        result = runner.invoke(
+            app,
+            [
+                "generate",
+                "--input",
+                input_path,
+                "--caption",
+                "test",
+                "--dry-run",
+                "--reference-category",
+                "vision_perception",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Dry Run" in result.output
+    finally:
+        Path(input_path).unlink(missing_ok=True)
+
+
+def test_generate_accepts_multiple_valid_reference_categories(monkeypatch):
+    """Comma-separated categories parse into a list and propagate to Settings."""
+    import paperbanana.core.config as config_mod
+
+    captured: dict[str, object] = {}
+    real_init = config_mod.Settings.__init__
+
+    def _spy_init(self, **kwargs):
+        captured["reference_category"] = kwargs.get("reference_category")
+        real_init(self, **kwargs)
+
+    monkeypatch.setattr(config_mod.Settings, "__init__", _spy_init)
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("Sample methodology text for testing.")
+        input_path = f.name
+
+    try:
+        result = runner.invoke(
+            app,
+            [
+                "generate",
+                "--input",
+                input_path,
+                "--caption",
+                "test",
+                "--dry-run",
+                "--reference-category",
+                "vision_perception, nlp_language",  # whitespace must be tolerated
+            ],
+        )
+        assert result.exit_code == 0
+        assert captured["reference_category"] == ["vision_perception", "nlp_language"]
+    finally:
+        Path(input_path).unlink(missing_ok=True)
+
+
+def test_generate_accepts_vector_flag():
+    """--vector flag is accepted by the CLI in dry-run mode."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("Sample methodology text for testing.")
+        input_path = f.name
+
+    try:
+        result = runner.invoke(
+            app,
+            ["generate", "--input", input_path, "--caption", "test", "--dry-run", "--vector"],
+        )
+        assert result.exit_code == 0
+    finally:
+        Path(input_path).unlink(missing_ok=True)
+
+
+def test_generate_no_vector_flag_accepted():
+    """--no-vector flag (explicit opt-out) is accepted by the CLI in dry-run mode."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("Sample methodology text for testing.")
+        input_path = f.name
+
+    try:
+        result = runner.invoke(
+            app,
+            ["generate", "--input", input_path, "--caption", "test", "--dry-run", "--no-vector"],
+        )
+        assert result.exit_code == 0
+    finally:
+        Path(input_path).unlink(missing_ok=True)
 
 
 def test_ablate_retrieval_writes_report(monkeypatch):
@@ -459,7 +822,7 @@ def test_batch_resume_retry_failed(tmp_path, monkeypatch):
         app,
         ["batch", "--manifest", str(manifest), "--output-dir", str(tmp_path)],
     )
-    assert first.exit_code == 0
+    assert first.exit_code == 1  # flaky failed → non-zero exit
     batches = sorted(tmp_path.glob("batch_*/batch_report.json"))
     assert len(batches) == 1
     batch_dir = batches[0].parent
@@ -549,3 +912,617 @@ def test_plot_batch_supports_concurrency_and_retries(tmp_path, monkeypatch):
     assert all(item.get("status") == "success" for item in report["items"])
     flaky = next(item for item in report["items"] if item["id"] == "p2")
     assert flaky.get("attempts", 0) >= 2
+
+
+# ── TikZ export CLI tests ──────────────────────────────────────────
+
+
+def test_generate_dry_run_accepts_export_tikz_flag():
+    """paperbanana generate accepts --export-tikz in dry-run mode."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+        f.write("Sample methodology text for testing.")
+        input_path = f.name
+
+    try:
+        result = runner.invoke(
+            app,
+            [
+                "generate",
+                "--input",
+                input_path,
+                "--caption",
+                "test",
+                "--dry-run",
+                "--export-tikz",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Dry Run" in result.output
+    finally:
+        Path(input_path).unlink(missing_ok=True)
+
+
+def test_tikz_subcommand_missing_input():
+    """paperbanana tikz exits with error when input file is missing."""
+    result = runner.invoke(
+        app,
+        ["tikz", "--input", "/nonexistent/image.png"],
+    )
+    assert result.exit_code == 1
+    assert "not found" in result.output.lower()
+
+
+def test_tikz_subcommand_invalid_diagram_type():
+    """paperbanana tikz rejects invalid --diagram-type values."""
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        # Write a minimal PNG header so the file exists
+        f.write(b"\x89PNG\r\n\x1a\n")
+        img_path = f.name
+
+    try:
+        result = runner.invoke(
+            app,
+            ["tikz", "--input", img_path, "--diagram-type", "invalid"],
+        )
+        assert result.exit_code == 1
+        assert "diagram" in result.output.lower() or "plot" in result.output.lower()
+    finally:
+        Path(img_path).unlink(missing_ok=True)
+
+
+def test_tikz_subcommand_invalid_venue():
+    """paperbanana tikz rejects invalid --venue values."""
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        img_path = f.name
+
+    try:
+        result = runner.invoke(
+            app,
+            ["tikz", "--input", img_path, "--venue", "arxiv"],
+        )
+        assert result.exit_code == 1
+        assert "venue" in result.output.lower()
+    finally:
+        Path(img_path).unlink(missing_ok=True)
+
+
+def test_tikz_subcommand_missing_source_context():
+    """paperbanana tikz exits with error when --source-context file is missing."""
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        f.write(b"\x89PNG\r\n\x1a\n")
+        img_path = f.name
+
+    try:
+        result = runner.invoke(
+            app,
+            [
+                "tikz",
+                "--input",
+                img_path,
+                "--source-context",
+                "/nonexistent/method.txt",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "not found" in result.output.lower()
+    finally:
+        Path(img_path).unlink(missing_ok=True)
+
+
+def test_tikz_subcommand_help():
+    """paperbanana tikz --help shows expected options."""
+    output = invoke_help("tikz")
+    assert "--input" in output
+    assert "--output" in output
+    assert "--source-context" in output
+    assert "--diagram-type" in output
+    assert "--vlm-provider" in output
+    assert "--venue" in output
+
+
+def test_plot_accepts_export_pgfplots_flag(tmp_path):
+    """paperbanana plot --help shows --export-pgfplots flag."""
+    output = invoke_help("plot")
+    assert "--export-pgfplots" in output
+
+
+def test_batch_prints_status_table_on_partial_failure(tmp_path, monkeypatch):
+    """batch prints per-item table, correct counts, and exits 1 when any item fails."""
+    from paperbanana.core.types import CritiqueResult, GenerationOutput, IterationRecord
+
+    txt = tmp_path / "input.txt"
+    txt.write_text("methodology text", encoding="utf-8")
+    manifest = tmp_path / "manifest.yaml"
+    manifest.write_text(
+        f"items:\n  - input: {txt.name}\n    caption: 'fig1'\n    id: item_ok\n"
+        f"  - input: {txt.name}\n    caption: 'fig2'\n    id: item_fail\n",
+        encoding="utf-8",
+    )
+    call_state = {"n": 0}
+
+    class _FakePipeline:
+        def __init__(self, settings=None, **kwargs):
+            pass
+
+        async def generate(self, gen_input):
+            call_state["n"] += 1
+            if call_state["n"] == 2:
+                raise RuntimeError("critic parse error")
+            img = str(tmp_path / "out.png")
+            return GenerationOutput(
+                image_path=img,
+                description="d",
+                iterations=[
+                    IterationRecord(
+                        iteration=1,
+                        description="d",
+                        image_path=img,
+                        critique=CritiqueResult(critic_suggestions=[]),
+                    )
+                ],
+                metadata={"run_id": "r1"},
+            )
+
+    monkeypatch.setattr("paperbanana.core.pipeline.PaperBananaPipeline", _FakePipeline)
+    result = runner.invoke(
+        app, ["batch", "--manifest", str(manifest), "--output-dir", str(tmp_path)]
+    )
+    assert result.exit_code == 1
+    assert "1 succeeded" in result.output
+    assert "1 failed" in result.output
+    assert "✓" in result.output
+    assert "✗" in result.output
+
+
+def test_evaluate_plot_rejects_missing_data_file(tmp_path):
+    """evaluate-plot fails early when the data file does not exist."""
+    generated = tmp_path / "generated.png"
+    reference = tmp_path / "reference.png"
+    generated.write_bytes(b"fake-image")
+    reference.write_bytes(b"fake-image")
+
+    result = runner.invoke(
+        app,
+        [
+            "evaluate-plot",
+            "--generated",
+            str(generated),
+            "--reference",
+            str(reference),
+            "--data",
+            str(tmp_path / "missing.csv"),
+            "--intent",
+            "Compare method variants",
+        ],
+    )
+    assert result.exit_code == 1
+    assert "Data file not found" in result.output
+
+
+# ── References subcommand tests ──────────────────────────────────
+
+
+def _build_reference_store(tmp_path, examples=None):
+    """Create a minimal reference store for testing."""
+    store_dir = tmp_path / "ref_store"
+    store_dir.mkdir()
+    (store_dir / "images").mkdir()
+
+    if examples is None:
+        examples = [
+            {
+                "id": "2404.00001v1",
+                "source_context": "Methodology section text.",
+                "caption": "Overview of our model architecture.",
+                "image_path": "images/2404.00001v1.jpg",
+                "category": "nlp_language",
+                "aspect_ratio": 1.5,
+            },
+            {
+                "id": "2404.00002v1",
+                "source_context": "Another methodology section.",
+                "caption": "Training pipeline for the vision model.",
+                "image_path": "images/2404.00002v1.jpg",
+                "category": "vision_perception",
+                "aspect_ratio": 2.0,
+            },
+            {
+                "id": "2404.00003v1",
+                "source_context": "Third methodology section.",
+                "caption": "Agent reasoning framework.",
+                "image_path": "images/2404.00003v1.jpg",
+                "category": "nlp_language",
+                "aspect_ratio": 1.0,
+            },
+        ]
+
+    data = {
+        "metadata": {
+            "name": "test",
+            "version": "1.0.0",
+            "categories": list({e["category"] for e in examples}),
+            "total_examples": len(examples),
+        },
+        "examples": examples,
+    }
+    (store_dir / "index.json").write_text(json.dumps(data), encoding="utf-8")
+    return store_dir
+
+
+def test_references_list(tmp_path, monkeypatch):
+    """references list prints a table with all examples."""
+    store_dir = _build_reference_store(tmp_path)
+    monkeypatch.setenv("REFERENCE_SET_PATH", str(store_dir))
+
+    result = runner.invoke(app, ["references", "list"])
+    assert result.exit_code == 0
+    assert "2404.00001v1" in result.output
+    assert "2404.00002v1" in result.output
+    assert "2404.00003v1" in result.output
+    assert "3" in result.output  # count in title
+
+
+def test_references_list_filter_by_category(tmp_path, monkeypatch):
+    """references list --category filters correctly."""
+    store_dir = _build_reference_store(tmp_path)
+    monkeypatch.setenv("REFERENCE_SET_PATH", str(store_dir))
+
+    result = runner.invoke(app, ["references", "list", "--category", "vision_perception"])
+    assert result.exit_code == 0
+    assert "2404.00002v1" in result.output
+    assert "2404.00001v1" not in result.output
+
+
+def test_references_list_json(tmp_path, monkeypatch):
+    """references list --json emits valid JSON."""
+    store_dir = _build_reference_store(tmp_path)
+    monkeypatch.setenv("REFERENCE_SET_PATH", str(store_dir))
+
+    result = runner.invoke(app, ["references", "list", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert len(data) == 3
+    assert all("id" in item for item in data)
+
+
+def test_references_show(tmp_path, monkeypatch):
+    """references show displays details for a specific example."""
+    store_dir = _build_reference_store(tmp_path)
+    monkeypatch.setenv("REFERENCE_SET_PATH", str(store_dir))
+
+    result = runner.invoke(app, ["references", "show", "2404.00001v1"])
+    assert result.exit_code == 0
+    assert "2404.00001v1" in result.output
+    assert "nlp_language" in result.output
+    assert "Overview of our model architecture" in result.output
+
+
+def test_references_show_not_found(tmp_path, monkeypatch):
+    """references show exits 1 for unknown ID."""
+    store_dir = _build_reference_store(tmp_path)
+    monkeypatch.setenv("REFERENCE_SET_PATH", str(store_dir))
+
+    result = runner.invoke(app, ["references", "show", "nonexistent"])
+    assert result.exit_code == 1
+    assert "No reference found" in result.output
+
+
+def test_references_show_json(tmp_path, monkeypatch):
+    """references show --json emits valid JSON."""
+    store_dir = _build_reference_store(tmp_path)
+    monkeypatch.setenv("REFERENCE_SET_PATH", str(store_dir))
+
+    result = runner.invoke(app, ["references", "show", "2404.00001v1", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["id"] == "2404.00001v1"
+    assert data["category"] == "nlp_language"
+
+
+def test_references_categories(tmp_path, monkeypatch):
+    """references categories shows category counts."""
+    store_dir = _build_reference_store(tmp_path)
+    monkeypatch.setenv("REFERENCE_SET_PATH", str(store_dir))
+
+    result = runner.invoke(app, ["references", "categories"])
+    assert result.exit_code == 0
+    assert "nlp_language" in result.output
+    assert "vision_perception" in result.output
+    assert "3" in result.output  # total
+
+
+def test_references_categories_json(tmp_path, monkeypatch):
+    """references categories --json emits valid JSON with counts."""
+    store_dir = _build_reference_store(tmp_path)
+    monkeypatch.setenv("REFERENCE_SET_PATH", str(store_dir))
+
+    result = runner.invoke(app, ["references", "categories", "--json"])
+    assert result.exit_code == 0
+    data = json.loads(result.output)
+    assert data["nlp_language"] == 2
+    assert data["vision_perception"] == 1
+
+
+# ── generate --continue-run output dir resolution (issue #217) ──────
+
+
+def _make_run_dir(base: Path, run_id: str = "run_20260518_190654_814b57") -> Path:
+    """Create a minimal resumable run directory under *base*."""
+    run_dir = base / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "run_input.json").write_text(
+        json.dumps(
+            {
+                "source_context": "Method text",
+                "communicative_intent": "Overview figure",
+                "diagram_type": "methodology",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "planning.json").write_text(
+        json.dumps({"optimized_description": "A described diagram"}),
+        encoding="utf-8",
+    )
+    return run_dir
+
+
+def _fake_continue_pipeline(tmp_path: Path, captured: dict):
+    from paperbanana.core.types import GenerationOutput
+
+    class _FakePipeline:
+        def __init__(self, settings=None, **kwargs):
+            captured["settings"] = settings
+
+        async def continue_run(
+            self,
+            resume_state,
+            additional_iterations=None,
+            user_feedback=None,
+            progress_callback=None,
+        ):
+            captured["resume_state"] = resume_state
+            captured["user_feedback"] = user_feedback
+            out_path = tmp_path / "continued.png"
+            out_path.write_bytes(b"fake")
+            return GenerationOutput(
+                image_path=str(out_path),
+                description="continued",
+                iterations=[],
+                metadata={"run_id": resume_state.run_id},
+            )
+
+    return _FakePipeline
+
+
+def test_continue_run_with_custom_output_dir(tmp_path, monkeypatch):
+    """--continue-run finds the run under --output-dir, not just settings.output_dir."""
+    custom_out = tmp_path / "custom_out"
+    run_dir = _make_run_dir(custom_out)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "paperbanana.core.pipeline.PaperBananaPipeline",
+        _fake_continue_pipeline(tmp_path, captured),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "generate",
+            "--continue-run",
+            run_dir.name,
+            "--output-dir",
+            str(custom_out),
+            "--feedback",
+            "tweak the colours",
+        ],
+        terminal_width=HELP_TERMINAL_WIDTH,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Done!" in result.output
+    assert captured["resume_state"].run_id == run_dir.name
+    assert Path(captured["resume_state"].run_dir) == run_dir
+    assert captured["user_feedback"] == "tweak the colours"
+
+
+def test_continue_run_accepts_run_dir_path(tmp_path, monkeypatch):
+    """--continue-run accepts an absolute path to the run directory itself."""
+    run_dir = _make_run_dir(tmp_path / "elsewhere")
+    captured: dict = {}
+    monkeypatch.setattr(
+        "paperbanana.core.pipeline.PaperBananaPipeline",
+        _fake_continue_pipeline(tmp_path, captured),
+    )
+
+    result = runner.invoke(
+        app,
+        ["generate", "--continue-run", str(run_dir)],
+        terminal_width=HELP_TERMINAL_WIDTH,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["resume_state"].run_id == run_dir.name
+    assert Path(captured["resume_state"].run_dir) == run_dir
+
+
+def test_continue_latest_uses_custom_output_dir(tmp_path, monkeypatch):
+    """--continue (latest) resolves the run under --output-dir."""
+    custom_out = tmp_path / "custom_out"
+    run_dir = _make_run_dir(custom_out)
+    captured: dict = {}
+    monkeypatch.setattr(
+        "paperbanana.core.pipeline.PaperBananaPipeline",
+        _fake_continue_pipeline(tmp_path, captured),
+    )
+
+    result = runner.invoke(
+        app,
+        ["generate", "--continue", "--output-dir", str(custom_out)],
+        terminal_width=HELP_TERMINAL_WIDTH,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["resume_state"].run_id == run_dir.name
+
+
+def test_continue_run_missing_reports_searched_path(tmp_path):
+    """Missing run errors clearly with the directory that was searched."""
+    empty_out = tmp_path / "empty_out"
+    empty_out.mkdir()
+
+    result = runner.invoke(
+        app,
+        [
+            "generate",
+            "--continue-run",
+            "run_missing",
+            "--output-dir",
+            str(empty_out),
+        ],
+        terminal_width=HELP_TERMINAL_WIDTH,
+    )
+
+    flat = result.output.replace("\n", "")
+    assert result.exit_code == 1
+    assert "Run directory not found" in flat
+    assert "run_missing" in flat
+    assert str(empty_out.resolve()) in flat
+
+
+def test_continue_run_missing_path_reports_resolved_path(tmp_path):
+    """A path-form --continue-run that doesn't exist errors with the resolved path."""
+    missing = tmp_path / "nowhere" / "run_x"
+
+    result = runner.invoke(
+        app,
+        ["generate", "--continue-run", str(missing)],
+        terminal_width=HELP_TERMINAL_WIDTH,
+    )
+
+    flat = result.output.replace("\n", "")
+    assert result.exit_code == 1
+    assert "Run directory not found" in flat
+    assert "run_x" in flat
+
+
+# ── --image (reference/sketch) flag tests ─────────────────────────────────────
+
+
+def _strip_ansi(output: str) -> str:
+    """Strip ANSI color escapes so assertions are stable under rich/CI."""
+    import re
+
+    return re.sub(r"\x1b\[[0-9;]*m", "", output)
+
+
+def _write_png(path: Path, size=(4, 4)) -> Path:
+    from PIL import Image
+
+    Image.new("RGB", size, color=(0, 0, 255)).save(path)
+    return path
+
+
+def test_generate_image_flag_round_trip(tmp_path, monkeypatch):
+    """Repeatable --image paths propagate into GenerationInput.input_images."""
+    import paperbanana.core.types as types_mod
+
+    captured: dict[str, object] = {}
+    real_init = types_mod.GenerationInput.__init__
+
+    def _spy_init(self, **kwargs):
+        captured.update(kwargs)
+        real_init(self, **kwargs)
+
+    monkeypatch.setattr(types_mod.GenerationInput, "__init__", _spy_init)
+
+    input_path = tmp_path / "method.txt"
+    input_path.write_text("Sample methodology text for testing.", encoding="utf-8")
+    sketch1 = _write_png(tmp_path / "sketch1.png")
+    sketch2 = _write_png(tmp_path / "sketch2.png")
+
+    result = runner.invoke(
+        app,
+        [
+            "generate",
+            "--input",
+            str(input_path),
+            "--caption",
+            "test",
+            "--image",
+            str(sketch1),
+            "--image",
+            str(sketch2),
+            "--dry-run",
+        ],
+    )
+
+    output = _strip_ansi(result.output)
+    assert result.exit_code == 0
+    assert captured["input_images"] == [str(sketch1), str(sketch2)]
+    assert "Reference images:" in output
+
+
+def test_generate_image_flag_missing_file_errors(tmp_path):
+    """--image with a nonexistent path fails before the pipeline starts."""
+    input_path = tmp_path / "method.txt"
+    input_path.write_text("Sample methodology text for testing.", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "generate",
+            "--input",
+            str(input_path),
+            "--caption",
+            "test",
+            "--image",
+            str(tmp_path / "missing_sketch.png"),
+            "--dry-run",
+        ],
+    )
+
+    output = _strip_ansi(result.output)
+    assert result.exit_code == 1
+    assert "Image file not found" in output
+
+
+def test_generate_image_flag_rejects_non_raster_file(tmp_path):
+    """--image with a non-image file (e.g. text with .png extension) errors clearly."""
+    input_path = tmp_path / "method.txt"
+    input_path.write_text("Sample methodology text for testing.", encoding="utf-8")
+    fake_image = tmp_path / "fake.png"
+    fake_image.write_text("this is not an image", encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "generate",
+            "--input",
+            str(input_path),
+            "--caption",
+            "test",
+            "--image",
+            str(fake_image),
+            "--dry-run",
+        ],
+    )
+
+    output = _strip_ansi(result.output)
+    assert result.exit_code == 1
+    assert "Not a valid raster image" in output
+
+
+def test_generate_image_flag_rejected_with_continue(tmp_path):
+    """--image cannot be combined with --continue / --continue-run."""
+    sketch = _write_png(tmp_path / "sketch.png")
+
+    result = runner.invoke(
+        app,
+        ["generate", "--continue", "--image", str(sketch)],
+    )
+
+    output = _strip_ansi(result.output)
+    assert result.exit_code == 1
+    assert "--image cannot be used with --continue" in output

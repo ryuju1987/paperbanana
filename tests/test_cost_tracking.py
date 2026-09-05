@@ -24,19 +24,32 @@ class TestPricingLookup:
         assert result is not None
         assert result["input_per_1k"] > 0
 
+    def test_openai_gpt_5_5_pricing(self):
+        result = lookup_vlm_price("openai", "gpt-5.5")
+        assert result is not None
+        assert result["input_per_1k"] == pytest.approx(0.005)
+        assert result["output_per_1k"] == pytest.approx(0.03)
+
     def test_unknown_vlm_returns_none(self):
         result = lookup_vlm_price("unknown_provider", "unknown_model")
         assert result is None
 
     def test_exact_match_image(self):
         result = lookup_image_price("google_imagen", "gemini-3-pro-image-preview")
-        assert result is not None
-        assert result == 0.0
+        assert result == pytest.approx(0.134)
+
+    def test_gemini_flash_image_pricing(self):
+        result = lookup_image_price("google_imagen", "gemini-3.1-flash-image-preview")
+        assert result == pytest.approx(0.067)
 
     def test_openai_image_pricing(self):
         result = lookup_image_price("openai_imagen", "gpt-image-1.5")
         assert result is not None
         assert result > 0
+
+    def test_openai_gpt_image_2_pricing(self):
+        result = lookup_image_price("openai_imagen", "gpt-image-2")
+        assert result == pytest.approx(0.211)
 
     def test_unknown_image_returns_none(self):
         result = lookup_image_price("unknown", "unknown")
@@ -81,7 +94,7 @@ class TestCostTracker:
         assert tracker.entries[0].call_type == "image_gen"
         assert tracker.total_cost > 0
 
-    def test_free_tier_cost_is_zero(self):
+    def test_free_tier_vlm_paid_image_cost(self):
         tracker = CostTracker()
         tracker.record_vlm_call(
             provider="gemini",
@@ -95,7 +108,8 @@ class TestCostTracker:
             model="gemini-3-pro-image-preview",
             agent="visualizer",
         )
-        assert tracker.total_cost == 0.0
+        # VLM side is free tier; the image model is paid (issue #213).
+        assert tracker.total_cost == pytest.approx(0.134)
         assert tracker.pricing_complete is True
 
     def test_set_agent_fallback(self):
@@ -245,8 +259,8 @@ class TestCostEstimator:
         assert "image_calls" in result
         assert result["vlm_calls"] >= 6  # retriever + planner + stylist + 3x critic
         assert result["image_calls"] == 3
-        # Free tier — cost should be 0
-        assert result["estimated_total_usd"] == 0.0
+        # 3 paid images at $0.134 (issue #213); VLM side is free tier.
+        assert result["estimated_total_usd"] == pytest.approx(3 * 0.134)
 
     def test_paid_provider_estimation(self):
         from paperbanana.core.config import Settings
@@ -315,3 +329,35 @@ class TestCostEstimator:
         result = estimate_cost(settings)
         assert result["pricing_note"] is not None
         assert "unknown" in result["pricing_note"].lower()
+
+    def test_multi_candidate_scales_phase2_costs(self):
+        from paperbanana.core.config import Settings
+
+        base_kwargs = dict(
+            vlm_provider="openai",
+            vlm_model="gpt-5.2",
+            image_provider="openai_imagen",
+            image_model="gpt-image-1.5",
+            refinement_iterations=3,
+        )
+        single = estimate_cost(Settings(**base_kwargs))
+        multi = estimate_cost(Settings(**base_kwargs, num_candidates=4))
+
+        # Image (visualizer) and critic calls scale by N; Phase-1 planning
+        # calls (retriever, planner, stylist) do not.
+        assert multi["num_candidates"] == 4
+        assert multi["image_calls"] == single["image_calls"] * 4
+        phase1_calls = single["vlm_calls"] - 3  # 3 critic calls in single run
+        assert multi["vlm_calls"] == phase1_calls + 3 * 4
+        assert multi["breakdown_by_agent"]["visualizer"] == pytest.approx(
+            single["breakdown_by_agent"]["visualizer"] * 4
+        )
+        assert multi["breakdown_by_agent"]["critic"] == pytest.approx(
+            single["breakdown_by_agent"]["critic"] * 4
+        )
+        assert multi["breakdown_by_agent"]["planner"] == pytest.approx(
+            single["breakdown_by_agent"]["planner"]
+        )
+        assert multi["estimated_total_usd"] > single["estimated_total_usd"]
+        assert "multi-candidate" in multi["pricing_note"].lower()
+        assert single["num_candidates"] == 1

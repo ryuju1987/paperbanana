@@ -6,19 +6,24 @@ import math
 from pathlib import Path
 from typing import Any, Optional
 
+from paperbanana.core.types import DiagramType
 from paperbanana.studio import runs as runs_mod
 from paperbanana.studio.runner import (
     ASPECT_RATIO_CHOICES,
     IMAGE_PROVIDER_CHOICES,
+    REFERENCE_CATEGORY_CHOICES,
     VLM_PROVIDER_CHOICES,
     build_settings,
     merge_context,
     run_batch,
+    run_composite,
     run_continue,
     run_evaluate,
     run_methodology,
+    run_orchestration,
     run_plot,
     run_plot_batch,
+    run_sweep,
 )
 
 
@@ -38,6 +43,13 @@ def _upload_path(file_obj: Any) -> Optional[str]:
     if isinstance(file_obj, str):
         return file_obj if file_obj.strip() else None
     return getattr(file_obj, "name", None) or str(file_obj)
+
+
+def _venue_choices() -> list[str]:
+    """Available venue style packs (built-in and user) plus 'custom'."""
+    from paperbanana.guidelines.venues import list_venues
+
+    return sorted(list_venues()) + ["custom"]
 
 
 def build_studio_app(
@@ -130,7 +142,7 @@ def build_studio_app(
             with gr.Row():
                 fmt = gr.Dropdown(
                     label="Output format",
-                    choices=["png", "jpeg", "webp"],
+                    choices=["png", "jpeg", "webp", "svg"],
                     value="png",
                 )
                 iters = gr.Number(label="Refinement iterations", value=3, precision=0, minimum=1)
@@ -218,6 +230,18 @@ def build_studio_app(
                     choices=ASPECT_RATIO_CHOICES,
                     value="default",
                 )
+                ref_cat = gr.Dropdown(
+                    label="Reference category filter",
+                    choices=REFERENCE_CATEGORY_CHOICES,
+                    value="",
+                    multiselect=True,
+                    info="Constrain retrieval to specific domains (empty = all)",
+                )
+                ref_ids = gr.Textbox(
+                    label="Reference IDs (optional)",
+                    placeholder="Comma-separated IDs, e.g. 2404.15806v1,2312.00001v1",
+                    info="Leave empty to use automatic retrieval",
+                )
                 d_log = gr.Textbox(label="Progress log", lines=18)
                 d_img = gr.Image(label="Final diagram", type="filepath")
                 d_gal = gr.Gallery(
@@ -246,17 +270,27 @@ def build_studio_app(
                     file,
                     caption,
                     aspect,
+                    ref_cats,
+                    ref_ids_str,
                 ):
                     _dotenv()
                     try:
+                        cats = [x for x in (ref_cats or []) if x]
                         st = _settings(od, c, vp, vm, ip, im, fo, it, au, mx, op, sp, sd)
+                        if cats:
+                            st.reference_category = cats
                         ctx = merge_context(text, _upload_path(file))
                         if not ctx.strip():
                             return "Context is empty.", None, []
                         if not (caption or "").strip():
                             return "Caption is required.", None, []
                         log, img, gal, err = run_methodology(
-                            st, ctx, caption, aspect, verbose_logging=False
+                            st,
+                            ctx,
+                            caption,
+                            aspect,
+                            reference_ids=ref_ids_str or None,
+                            verbose_logging=False,
                         )
                         if err:
                             return log, None, gal
@@ -284,6 +318,8 @@ def build_studio_app(
                         ctx_file,
                         cap,
                         ar,
+                        ref_cat,
+                        ref_ids,
                     ],
                     outputs=[d_log, d_img, d_gal],
                 )
@@ -373,12 +409,21 @@ def build_studio_app(
                     "Compare a **generated** image to a **human reference** using the "
                     "paper’s VLM-as-judge protocol (four dimensions + overall)."
                 )
+                ev_target = gr.Radio(
+                    label="Evaluation target",
+                    choices=["Methodology diagram", "Statistical plot"],
+                    value="Methodology diagram",
+                )
                 g_img = gr.Image(label="Generated diagram", type="filepath")
                 r_img = gr.Image(label="Human reference", type="filepath")
                 ev_ctx = gr.Textbox(label="Source context", lines=8)
                 ev_ctx_f = gr.File(
                     label="Context file (optional)",
                     file_types=[".txt", ".md"],
+                )
+                ev_plot_data_f = gr.File(
+                    label="Plot data file (required for statistical plot evaluation)",
+                    file_types=[".csv", ".json"],
                 )
                 ev_cap = gr.Textbox(label="Figure caption", lines=2)
                 ev_log = gr.Textbox(label="Log", lines=6)
@@ -399,10 +444,12 @@ def build_studio_app(
                     op,
                     sp,
                     sd,
+                    target,
                     gen,
                     ref,
                     etext,
                     efile,
+                    plot_data_file,
                     ecap,
                 ):
                     _dotenv()
@@ -411,7 +458,21 @@ def build_studio_app(
                         gp = _upload_path(gen) or ""
                         rp = _upload_path(ref) or ""
                         ctx = merge_context(etext, _upload_path(efile))
-                        log, res = run_evaluate(st, gp, rp, ctx, ecap or "", verbose_logging=False)
+                        task = (
+                            DiagramType.STATISTICAL_PLOT
+                            if target == "Statistical plot"
+                            else DiagramType.METHODOLOGY
+                        )
+                        log, res = run_evaluate(
+                            st,
+                            gp,
+                            rp,
+                            ctx,
+                            ecap or "",
+                            evaluation_task=task,
+                            plot_data_path=_upload_path(plot_data_file) or "",
+                            verbose_logging=False,
+                        )
                         return log, res
                     except Exception as e:
                         return f"{type(e).__name__}: {e}", str(e)
@@ -432,10 +493,12 @@ def build_studio_app(
                         opt_in,
                         save_pr,
                         seed_val,
+                        ev_target,
                         g_img,
                         r_img,
                         ev_ctx,
                         ev_ctx_f,
+                        ev_plot_data_f,
                         ev_cap,
                     ],
                     outputs=[ev_log, ev_out],
@@ -648,6 +711,385 @@ def build_studio_app(
                     outputs=[b_log, b_dir],
                 )
 
+            # ── Figure-package orchestration ───────────────────────────────
+            with gr.Tab("Orchestrate"):
+                gr.Markdown(
+                    "Plan and generate a **full-paper figure package** (same workflow as "
+                    "`paperbanana orchestrate`). Upload a paper **or** set resume — not both. "
+                    "`Dry run` writes `orchestration_plan.json` only (planning still uses the VLM)."
+                )
+                o_paper = gr.File(
+                    label="Paper source (.txt, .md, .pdf)",
+                    file_types=[".txt", ".md", ".pdf"],
+                )
+                o_data = gr.Textbox(
+                    label="Data directory (optional, new runs only)",
+                    lines=1,
+                    placeholder="Folder with CSV/JSON for auto-planned plots",
+                )
+                o_pdf_pages = gr.Textbox(
+                    label="PDF pages (optional, PDF papers only)",
+                    lines=1,
+                    placeholder="e.g. 1-5,8  (empty = all pages)",
+                )
+                with gr.Row():
+                    o_max_m = gr.Number(
+                        label="Max methodology figures",
+                        value=4,
+                        precision=0,
+                        minimum=1,
+                    )
+                    o_max_p = gr.Number(
+                        label="Max plot figures",
+                        value=4,
+                        precision=0,
+                        minimum=0,
+                    )
+                with gr.Row():
+                    o_dry = gr.Checkbox(
+                        label="Dry run (plan only, no image generation)",
+                        value=False,
+                    )
+                    o_venue = gr.Dropdown(
+                        label="Venue style",
+                        choices=_venue_choices(),
+                        value="neurips",
+                    )
+                with gr.Row():
+                    o_resume = gr.Textbox(
+                        label="Resume orchestration (ID or directory path)",
+                        lines=1,
+                        placeholder="Optional: orchestrate_… under output dir, or full path",
+                    )
+                    o_retry = gr.Checkbox(label="Retry failed tasks", value=False)
+                with gr.Row():
+                    o_max_ret = gr.Number(label="Max retries per task", value=0, precision=0)
+                    o_conc = gr.Number(label="Concurrency", value=1, precision=0)
+                o_log = gr.Textbox(label="Orchestration log", lines=18)
+                o_dir = gr.Textbox(label="Orchestration directory", lines=1)
+                o_plan = gr.Textbox(label="orchestration_plan.json (preview)", lines=12)
+                o_pkg = gr.Textbox(label="figure_package.json (preview)", lines=12)
+                o_go = gr.Button("Run orchestration", variant="primary")
+
+                def _do_orch(
+                    od,
+                    c,
+                    vp,
+                    vm,
+                    ip,
+                    im,
+                    fo,
+                    it,
+                    au,
+                    mx,
+                    op,
+                    sp,
+                    sd,
+                    paper_f,
+                    data_dir_s,
+                    pdf_pgs,
+                    max_m,
+                    max_p,
+                    dry,
+                    venue_v,
+                    resume_s,
+                    retry_f,
+                    max_ret,
+                    conc,
+                ):
+                    _dotenv()
+                    try:
+                        st0 = _settings(od, c, vp, vm, ip, im, fo, it, au, mx, op, sp, sd)
+                        pp = _upload_path(paper_f)
+                        log, d, plan_pr, pkg_pr = run_orchestration(
+                            st0,
+                            paper_file_path=pp,
+                            resume_orchestrate=(resume_s or "").strip() or None,
+                            data_dir=(data_dir_s or "").strip() or None,
+                            max_method_figures=int(max_m or 4),
+                            max_plot_figures=int(max_p or 4),
+                            pdf_pages=(pdf_pgs or "").strip() or None,
+                            dry_run=bool(dry),
+                            venue=str(venue_v or "neurips"),
+                            retry_failed=bool(retry_f),
+                            max_retries=max(0, int(max_ret or 0)),
+                            concurrency=max(1, int(conc or 1)),
+                            config_path=(c or "").strip() or None,
+                            verbose_logging=False,
+                        )
+                        return log, d, plan_pr, pkg_pr
+                    except Exception as e:
+                        return f"{type(e).__name__}: {e}", "", "", ""
+
+                o_go.click(
+                    _do_orch,
+                    inputs=[
+                        out_dir,
+                        cfg,
+                        vlm_p,
+                        vlm_m,
+                        img_p,
+                        img_m,
+                        fmt,
+                        iters,
+                        auto_ref,
+                        max_it,
+                        opt_in,
+                        save_pr,
+                        seed_val,
+                        o_paper,
+                        o_data,
+                        o_pdf_pages,
+                        o_max_m,
+                        o_max_p,
+                        o_dry,
+                        o_venue,
+                        o_resume,
+                        o_retry,
+                        o_max_ret,
+                        o_conc,
+                    ],
+                    outputs=[o_log, o_dir, o_plan, o_pkg],
+                )
+
+            # ── Composite multi-panel figure ──────────────────────────────
+            with gr.Tab("Composite"):
+                gr.Markdown(
+                    "Compose multiple images into a single labeled multi-panel figure with "
+                    "`(a)`, `(b)`, `(c)` sub-panels. No API calls — pure local image processing."
+                )
+                cmp_files = gr.File(
+                    label="Panel images",
+                    file_count="multiple",
+                    file_types=[".png", ".jpg", ".jpeg", ".webp"],
+                )
+                with gr.Row():
+                    cmp_layout = gr.Dropdown(
+                        label="Layout",
+                        choices=["auto", "1x2", "1x3", "1x4", "2x2", "2x3", "3x3"],
+                        value="auto",
+                        allow_custom_value=True,
+                    )
+                    cmp_label_pos = gr.Radio(
+                        label="Label position",
+                        choices=["bottom", "top"],
+                        value="bottom",
+                    )
+                cmp_labels = gr.Textbox(
+                    label="Labels",
+                    placeholder="Comma-separated (e.g. (a),(b),(c)), empty=auto, 'none'=disable",
+                    value="",
+                )
+                with gr.Row():
+                    cmp_spacing = gr.Number(label="Spacing (px)", value=20, precision=0)
+                    cmp_font = gr.Number(label="Label font size", value=32, precision=0)
+                cmp_filename = gr.Textbox(label="Output filename", value="composite.png")
+                cmp_go = gr.Button("Compose figure", variant="primary")
+                cmp_log = gr.Textbox(label="Log", lines=8)
+                cmp_out = gr.Image(label="Composite output", type="filepath")
+
+                def _do_composite(
+                    od,
+                    files,
+                    layout,
+                    labels,
+                    spacing,
+                    label_pos,
+                    font_size,
+                    filename,
+                ):
+                    _dotenv()
+                    paths = []
+                    if files:
+                        for f in files:
+                            p = _upload_path(f)
+                            if p:
+                                paths.append(p)
+                    spacing_int = int(spacing) if spacing is not None else 20
+                    font_int = int(font_size) if font_size is not None else 32
+                    try:
+                        log, out_path = run_composite(
+                            paths,
+                            output_dir=od or default_output_dir,
+                            layout=str(layout) if layout else "auto",
+                            labels=labels or "",
+                            spacing=spacing_int,
+                            label_position=str(label_pos or "bottom"),
+                            label_font_size=font_int,
+                            output_filename=filename or "composite.png",
+                        )
+                        return log, out_path
+                    except Exception as e:
+                        return f"{type(e).__name__}: {e}", None
+
+                cmp_go.click(
+                    _do_composite,
+                    inputs=[
+                        out_dir,
+                        cmp_files,
+                        cmp_layout,
+                        cmp_labels,
+                        cmp_spacing,
+                        cmp_label_pos,
+                        cmp_font,
+                        cmp_filename,
+                    ],
+                    outputs=[cmp_log, cmp_out],
+                )
+
+            # ── Sweep ─────────────────────────────────────────────────────
+            with gr.Tab("Sweep"):
+                gr.Markdown(
+                    "Run a multi-variant methodology sweep and rank outputs by the built-in "
+                    "quality proxy score. This currently uses a source file input."
+                )
+                sw_input = gr.File(
+                    label="Methodology source file",
+                    file_types=[".txt", ".md", ".pdf"],
+                )
+                sw_caption = gr.Textbox(label="Figure caption / communicative intent", lines=2)
+                sw_pdf_pages = gr.Textbox(
+                    label="PDF pages (optional)",
+                    placeholder="e.g. 1-5,7 (PDF inputs only)",
+                )
+                with gr.Row():
+                    sw_vlm_providers = gr.Textbox(
+                        label="VLM providers",
+                        value="",
+                        placeholder="Comma-separated, e.g. gemini,openai",
+                    )
+                    sw_vlm_models = gr.Textbox(
+                        label="VLM models",
+                        value="",
+                        placeholder="Optional comma-separated models",
+                    )
+                with gr.Row():
+                    sw_img_providers = gr.Textbox(
+                        label="Image providers",
+                        value="",
+                        placeholder="Comma-separated, e.g. google_imagen,openai_imagen",
+                    )
+                    sw_img_models = gr.Textbox(
+                        label="Image models",
+                        value="",
+                        placeholder="Optional comma-separated models",
+                    )
+                with gr.Row():
+                    sw_iterations = gr.Textbox(
+                        label="Iteration axis",
+                        value="",
+                        placeholder="Comma-separated ints, e.g. 2,3,4",
+                    )
+                    sw_opt_modes = gr.Textbox(
+                        label="Optimize axis",
+                        value="",
+                        placeholder="on,off",
+                    )
+                    sw_auto_modes = gr.Textbox(
+                        label="Auto-refine axis",
+                        value="",
+                        placeholder="off,on",
+                    )
+                with gr.Row():
+                    sw_max_variants = gr.Number(
+                        label="Max variants (optional)",
+                        value=None,
+                        precision=0,
+                    )
+                    sw_dry_run = gr.Checkbox(label="Dry run (plan only)", value=False)
+                sw_log = gr.Textbox(label="Sweep log", lines=16)
+                sw_dir = gr.Textbox(label="Sweep output directory")
+                sw_report = gr.Textbox(label="sweep_report.json path")
+                sw_go = gr.Button("Run sweep", variant="primary")
+
+                def _do_sweep(
+                    od,
+                    c,
+                    vp,
+                    vm,
+                    ip,
+                    im,
+                    fo,
+                    it,
+                    au,
+                    mx,
+                    op,
+                    sp,
+                    sd,
+                    infile,
+                    caption,
+                    pdf_pages,
+                    svp,
+                    svm,
+                    sip,
+                    sim,
+                    siters,
+                    sopt,
+                    sauto,
+                    smax,
+                    sdry,
+                ):
+                    _dotenv()
+                    try:
+                        path = _upload_path(infile)
+                        if not path:
+                            return "Upload a methodology source file.", "", ""
+                        st = _settings(od, c, vp, vm, ip, im, fo, it, au, mx, op, sp, sd)
+                        max_variants_int: Optional[int] = None
+                        if smax is not None and not (isinstance(smax, float) and math.isnan(smax)):
+                            max_variants_int = int(smax)
+                        log, sweep_dir, report_path = run_sweep(
+                            st,
+                            input_path=path,
+                            caption=caption or "",
+                            pdf_pages=(pdf_pages or "").strip() or None,
+                            vlm_providers=svp or "",
+                            vlm_models=svm or "",
+                            image_providers=sip or "",
+                            image_models=sim or "",
+                            iterations=siters or "",
+                            optimize_modes=sopt or "",
+                            auto_modes=sauto or "",
+                            max_variants=max_variants_int,
+                            dry_run=bool(sdry),
+                            verbose_logging=False,
+                        )
+                        return log, sweep_dir, report_path
+                    except Exception as e:
+                        return f"{type(e).__name__}: {e}", "", ""
+
+                sw_go.click(
+                    _do_sweep,
+                    inputs=[
+                        out_dir,
+                        cfg,
+                        vlm_p,
+                        vlm_m,
+                        img_p,
+                        img_m,
+                        fmt,
+                        iters,
+                        auto_ref,
+                        max_it,
+                        opt_in,
+                        save_pr,
+                        seed_val,
+                        sw_input,
+                        sw_caption,
+                        sw_pdf_pages,
+                        sw_vlm_providers,
+                        sw_vlm_models,
+                        sw_img_providers,
+                        sw_img_models,
+                        sw_iterations,
+                        sw_opt_modes,
+                        sw_auto_modes,
+                        sw_max_variants,
+                        sw_dry_run,
+                    ],
+                    outputs=[sw_log, sw_dir, sw_report],
+                )
+
             # ── Runs browser ──────────────────────────────────────────────
             with gr.Tab("Runs"):
                 gr.Markdown("Inspect previous **run_*** and **batch_*** directories.")
@@ -668,14 +1110,36 @@ def build_studio_app(
                 rb_inp = gr.Textbox(label="run_input.json (preview)", lines=10)
                 rb_gal = gr.Gallery(label="Iteration thumbnails", columns=4, height=220)
                 bb_report = gr.Textbox(label="batch_report.json (preview)", lines=14)
+                gr.Markdown("### Run Compare")
+                with gr.Row():
+                    cmp_left = gr.Dropdown(
+                        label="Left run",
+                        choices=[],
+                        allow_custom_value=True,
+                    )
+                    cmp_right = gr.Dropdown(
+                        label="Right run",
+                        choices=[],
+                        allow_custom_value=True,
+                    )
+                cmp_go = gr.Button("Compare runs")
+                with gr.Row():
+                    cmp_left_img = gr.Image(label="Left final output", type="filepath")
+                    cmp_right_img = gr.Image(label="Right final output", type="filepath")
+                cmp_diff = gr.Markdown()
+                cmp_left_details = gr.Textbox(label="Left run details", lines=12)
+                cmp_right_details = gr.Textbox(label="Right run details", lines=12)
 
                 def _refresh(od: str):
                     root = (od or default_output_dir).strip() or default_output_dir
                     r = runs_mod.list_run_ids(root)
                     b = runs_mod.list_batch_ids(root)
+                    left_default = r[-2] if len(r) >= 2 else (r[-1] if r else None)
                     return (
                         gr.update(choices=r, value=r[-1] if r else None),
                         gr.update(choices=b, value=b[-1] if b else None),
+                        gr.update(choices=r, value=left_default),
+                        gr.update(choices=r, value=r[-1] if r else None),
                     )
 
                 def _show_run(od: str, rid: Optional[str]):
@@ -696,10 +1160,63 @@ def build_studio_app(
                     s = runs_mod.load_batch_summary(root, bid)
                     return s.get("report_preview") or ""
 
+                def _render_compare_details(data: dict[str, Any]) -> str:
+                    keys = [
+                        "run_id",
+                        "diagram_type",
+                        "caption",
+                        "aspect_ratio",
+                        "vlm_provider",
+                        "vlm_model",
+                        "image_provider",
+                        "image_model",
+                        "output_format",
+                        "refinement_iterations",
+                        "auto_refine",
+                        "max_iterations",
+                        "seed",
+                        "duration_seconds",
+                        "total_cost_usd",
+                    ]
+                    lines: list[str] = []
+                    for key in keys:
+                        lines.append(f"{key}: {data.get(key)}")
+                    return "\n".join(lines)
+
+                def _show_compare(od: str, left_id: Optional[str], right_id: Optional[str]):
+                    if not left_id or not right_id:
+                        msg = "Select both runs to compare."
+                        return None, None, msg, "", ""
+                    root = (od or default_output_dir).strip() or default_output_dir
+                    cmp = runs_mod.compare_runs(root, left_id, right_id)
+                    if cmp.get("error"):
+                        msg = str(cmp["error"])
+                        return None, None, msg, "", ""
+                    left = cmp.get("left") or {}
+                    right = cmp.get("right") or {}
+                    diffs = cmp.get("diffs") or []
+                    if not diffs:
+                        diff_md = "No differences detected in tracked comparison fields."
+                    else:
+                        rows = ["### Differences", ""]
+                        for d in diffs:
+                            field = d.get("field")
+                            left_val = d.get("left")
+                            right_val = d.get("right")
+                            rows.append(f"- `{field}`: left=`{left_val}` | right=`{right_val}`")
+                        diff_md = "\n".join(rows)
+                    return (
+                        left.get("final_image"),
+                        right.get("final_image"),
+                        diff_md,
+                        _render_compare_details(left),
+                        _render_compare_details(right),
+                    )
+
                 rb_refresh.click(
                     _refresh,
                     inputs=[out_dir],
-                    outputs=[run_pick, batch_pick],
+                    outputs=[run_pick, batch_pick, cmp_left, cmp_right],
                 )
                 run_pick.change(
                     _show_run,
@@ -710,6 +1227,17 @@ def build_studio_app(
                     _show_batch,
                     inputs=[out_dir, batch_pick],
                     outputs=[bb_report],
+                )
+                cmp_go.click(
+                    _show_compare,
+                    inputs=[out_dir, cmp_left, cmp_right],
+                    outputs=[
+                        cmp_left_img,
+                        cmp_right_img,
+                        cmp_diff,
+                        cmp_left_details,
+                        cmp_right_details,
+                    ],
                 )
 
         gr.Markdown(

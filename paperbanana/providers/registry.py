@@ -33,6 +33,14 @@ _API_KEY_HINTS = {
         "  2. Set the environment variable:\n\n"
         "  export OPENAI_API_KEY=your-key-here"
     ),
+    "ATLASCLOUD_API_KEY": (
+        "ATLASCLOUD_API_KEY not found.\n\n"
+        "To fix this:\n"
+        "  1. Get an API key at: "
+        "https://www.atlascloud.ai/console/api-keys?utm_source=github&utm_medium=link&utm_campaign=paperbanana\n"
+        "  2. Set the environment variable:\n\n"
+        "  export ATLASCLOUD_API_KEY=your-key-here"
+    ),
     "ANTHROPIC_API_KEY": (
         "ANTHROPIC_API_KEY not found.\n\n"
         "To fix this:\n"
@@ -82,7 +90,7 @@ class ProviderRegistry:
     def create_vlm(settings: Settings) -> VLMProvider:
         """Create a VLM provider based on settings."""
         provider = settings.vlm_provider.lower()
-        logger.info("Creating VLM provider", provider=provider, model=settings.vlm_model)
+        logger.info("Creating VLM provider", provider=provider, model=settings.effective_vlm_model)
 
         if provider == "gemini":
             _validate_api_key(settings.google_api_key, "GOOGLE_API_KEY")
@@ -110,6 +118,15 @@ class ProviderRegistry:
                 model=settings.openai_vlm_model or settings.vlm_model,
                 base_url=settings.openai_base_url,
             )
+        elif provider == "atlas":
+            _validate_api_key(settings.atlascloud_api_key, "ATLASCLOUD_API_KEY")
+            from paperbanana.providers.vlm.atlas import AtlasVLM
+
+            return AtlasVLM(
+                api_key=settings.atlascloud_api_key,
+                model=settings.atlascloud_vlm_model or settings.vlm_model,
+                base_url=settings.atlascloud_base_url,
+            )
         elif provider == "bedrock":
             _validate_bedrock_auth(settings.aws_region, settings.aws_profile)
             from paperbanana.providers.vlm.bedrock import BedrockVLM
@@ -127,6 +144,24 @@ class ProviderRegistry:
                 api_key=settings.anthropic_api_key,
                 model=settings.vlm_model,
             )
+        elif provider == "ollama":
+            from paperbanana.providers.vlm.ollama import OllamaVLM
+
+            return OllamaVLM(
+                model=settings.ollama_model or settings.vlm_model,
+                base_url=settings.ollama_base_url,
+                json_mode=settings.ollama_json_mode,
+            )
+        elif provider == "openai_local":
+            from paperbanana.providers.vlm.openai import OpenAIVLM
+
+            return OpenAIVLM(
+                api_key=settings.openai_api_key or "not-needed",
+                model=settings.openai_vlm_model or settings.vlm_model,
+                base_url=settings.openai_local_base_url,
+                json_mode=settings.openai_local_json_mode,
+                provider_name="openai_local",
+            )
         elif provider == "claude_code":
             from paperbanana.providers.vlm.claude_code import ClaudeCodeVLM
 
@@ -138,20 +173,42 @@ class ProviderRegistry:
                     " ensure `claude` is available on PATH."
                 )
             return vlm
+        elif provider == "litellm":
+            from paperbanana.providers.vlm.litellm import LiteLLMVLM
+
+            vlm = LiteLLMVLM(
+                model=settings.litellm_model or settings.vlm_model,
+                api_key=settings.litellm_api_key,
+                api_base=settings.litellm_api_base,
+            )
+            if not vlm.is_available():
+                raise ImportError(
+                    "litellm is required for the LiteLLM provider. "
+                    "Install with: pip install 'paperbanana[litellm]'"
+                )
+            return vlm
         else:
             raise ValueError(
                 "Unknown VLM provider: "
-                f"{provider}. Available: gemini, openrouter,"
-                " openai, bedrock, anthropic, claude_code"
+                f"{provider}. Available: gemini, openrouter, openai, atlas, openai_local, "
+                f"bedrock, anthropic, ollama, claude_code, litellm"
             )
 
     @staticmethod
     def create_image_gen(settings: Settings) -> ImageGenProvider:
         """Create an image generation provider based on settings."""
         provider = settings.image_provider.lower()
-        logger.info("Creating image gen provider", provider=provider, model=settings.image_model)
+        logger.info(
+            "Creating image gen provider",
+            provider=provider,
+            model=settings.effective_image_model,
+        )
 
-        if provider == "google_imagen":
+        if provider == "none":
+            from paperbanana.providers.image_gen.dummy import DummyImageGen
+
+            return DummyImageGen()
+        elif provider == "google_imagen":
             _validate_api_key(settings.google_api_key, "GOOGLE_API_KEY")
             from paperbanana.providers.image_gen.google_imagen import GoogleImagenGen
 
@@ -179,6 +236,15 @@ class ProviderRegistry:
                 model=settings.openai_image_model or settings.image_model,
                 base_url=settings.openai_base_url,
             )
+        elif provider == "atlas_imagen":
+            _validate_api_key(settings.atlascloud_api_key, "ATLASCLOUD_API_KEY")
+            from paperbanana.providers.image_gen.atlas_imagen import AtlasImageGen
+
+            return AtlasImageGen(
+                api_key=settings.atlascloud_api_key,
+                model=settings.atlascloud_image_model or settings.image_model,
+                base_url=settings.atlascloud_image_base_url,
+            )
         elif provider == "bedrock_imagen":
             _validate_bedrock_auth(settings.aws_region, settings.aws_profile)
             from paperbanana.providers.image_gen.bedrock_imagen import BedrockImageGen
@@ -191,5 +257,6 @@ class ProviderRegistry:
         else:
             raise ValueError(
                 f"Unknown image provider: {provider}. "
-                f"Available: google_imagen, openrouter_imagen, openai_imagen, bedrock_imagen"
+                "Available: none, google_imagen, openrouter_imagen, "
+                "openai_imagen, atlas_imagen, bedrock_imagen"
             )

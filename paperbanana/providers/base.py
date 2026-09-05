@@ -57,6 +57,11 @@ class VLMProvider(ABC):
         """
         ...
 
+    @property
+    def supports_json_mode(self) -> bool:
+        """Whether this provider reliably handles response_format='json'."""
+        return True
+
     def is_available(self) -> bool:
         """Check if this provider is configured and available."""
         return True
@@ -67,6 +72,12 @@ class ImageGenProvider(ABC):
 
     Used by the Visualizer agent to generate methodology diagrams
     and other academic illustrations.
+
+    Guided edits (image-conditioned generation): providers that can edit an
+    existing image declare an additional ``images: Optional[list[Image.Image]]``
+    keyword on ``generate`` (see ``GoogleImagenGen``). Callers detect support
+    by inspecting the provider's ``generate`` signature — the base contract
+    below is text-to-image only.
     """
 
     cost_tracker: CostTracker | None = None
@@ -97,6 +108,7 @@ class ImageGenProvider(ABC):
         height: int = 1024,
         seed: Optional[int] = None,
         aspect_ratio: Optional[str] = None,
+        quality: Optional[str] = None,
     ) -> Image.Image:
         """Generate an image from a text prompt.
 
@@ -108,6 +120,7 @@ class ImageGenProvider(ABC):
             seed: Random seed for reproducibility.
             aspect_ratio: Target aspect ratio (1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9, 21:9).
                 takes precedence over width/height for providers that support it.
+            quality: Optional provider-specific rendering quality.
 
         Returns:
             Generated PIL Image.
