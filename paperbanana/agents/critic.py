@@ -8,13 +8,8 @@ from typing import Optional
 import structlog
 
 from paperbanana.agents.base import BaseAgent
-<<<<<<< HEAD
 from paperbanana.core.types import AxisScore, CritiqueResult, CritiqueRubric, DiagramType
-from paperbanana.core.utils import load_image
-=======
-from paperbanana.core.types import CritiqueResult, DiagramType
 from paperbanana.core.utils import extract_json, load_image, truncate_text
->>>>>>> upstream/main
 from paperbanana.providers.base import VLMProvider
 
 logger = structlog.get_logger()
@@ -109,47 +104,6 @@ class CriticAgent(BaseAgent):
         m = re.search(r"(?:diagram|plot)_iter_(\d+)\.", image_path)
         return f"critic_iter_{m.group(1)}" if m else None
 
-<<<<<<< HEAD
-    def _parse_response(self, response: str) -> CritiqueResult:
-        """Parse the VLM response into a CritiqueResult."""
-        try:
-            data = json.loads(response)
-
-            # Parse structured rubric if present (Harness Design 4-axis scoring)
-            rubric = None
-            rubric_data = data.get("rubric")
-            if rubric_data and isinstance(rubric_data, dict):
-                try:
-                    rubric = CritiqueRubric(
-                        design_quality=AxisScore(**rubric_data["design_quality"])
-                        if "design_quality" in rubric_data
-                        else None,
-                        originality=AxisScore(**rubric_data["originality"])
-                        if "originality" in rubric_data
-                        else None,
-                        craft=AxisScore(**rubric_data["craft"])
-                        if "craft" in rubric_data
-                        else None,
-                        functionality=AxisScore(**rubric_data["functionality"])
-                        if "functionality" in rubric_data
-                        else None,
-                    )
-                except (KeyError, TypeError, ValueError):
-                    logger.debug("Rubric parsing failed, using suggestions only")
-
-            return CritiqueResult(
-                critic_suggestions=data.get("critic_suggestions", []),
-                revised_description=data.get("revised_description"),
-                rubric=rubric,
-            )
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.warning("Failed to parse critic response", error=str(e))
-            # Conservative fallback: empty suggestions means no revision needed
-            return CritiqueResult(
-                critic_suggestions=[],
-                revised_description=None,
-            )
-=======
     def _parse_response(self, response: str | None) -> CritiqueResult:
         """Parse VLM response into a CritiqueResult."""
         if response is None:
@@ -161,6 +115,7 @@ class CriticAgent(BaseAgent):
                 return CritiqueResult(
                     critic_suggestions=data.get("critic_suggestions", []),
                     revised_description=data.get("revised_description"),
+                    rubric=self._parse_rubric(data.get("rubric")),
                 )
             except (KeyError, TypeError) as e:
                 logger.warning("Failed to build CritiqueResult", error=str(e))
@@ -169,4 +124,22 @@ class CriticAgent(BaseAgent):
             raw_response=truncate_text(response, 500),
         )
         return CritiqueResult(critic_suggestions=[], revised_description=None)
->>>>>>> upstream/main
+
+    @staticmethod
+    def _parse_rubric(rubric_data: object) -> CritiqueRubric | None:
+        """Parse the optional 4-axis rubric block (Harness Design scoring).
+
+        Returns None when the block is absent or malformed so a bad rubric never
+        discards the suggestions.
+        """
+        if not rubric_data or not isinstance(rubric_data, dict):
+            return None
+        try:
+            axes = {
+                name: AxisScore(**rubric_data[name]) if name in rubric_data else None
+                for name in ("design_quality", "originality", "craft", "functionality")
+            }
+            return CritiqueRubric(**axes)
+        except (KeyError, TypeError, ValueError):
+            logger.debug("Rubric parsing failed, using suggestions only")
+            return None

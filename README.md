@@ -120,11 +120,7 @@ cp .env.example .env
 #
 # Optional Gemini overrides:
 #   GOOGLE_BASE_URL=https://your-gemini-proxy.example.com
-<<<<<<< HEAD
-#   GOOGLE_VLM_MODEL=gemini-3-flash-preview
-=======
 #   GOOGLE_VLM_MODEL=gemini-2.5-flash
->>>>>>> upstream/main
 #   GOOGLE_IMAGE_MODEL=gemini-3-pro-image-preview
 ```
 
@@ -196,15 +192,10 @@ PaperBanana supports multiple VLM and image generation providers:
 |-----------|----------|-------|-------|
 | VLM (planning, critique) | OpenAI | `gpt-5.2` | Default |
 | Image Generation | OpenAI | `gpt-image-1.5` | Default |
-<<<<<<< HEAD
-| VLM | Google Gemini | `gemini-3-flash-preview` | Free tier |
-| Image Generation | Google Gemini | `gemini-3-pro-image-preview` | Free tier |
-=======
 | VLM | Atlas Cloud | `deepseek-ai/DeepSeek-V3-0324` | OpenAI-compatible chat endpoint |
 | Image Generation | Atlas Cloud | `openai/gpt-image-2/text-to-image` | Async prediction API |
 | VLM | Google Gemini | `gemini-2.5-flash` | Low cost |
 | Image Generation | Google Gemini | `gemini-3-pro-image-preview` | $0.134/image (1K) |
->>>>>>> upstream/main
 | VLM / Image | OpenRouter | Any supported model | Flexible routing |
 
 Azure OpenAI / Foundry endpoints are auto-detected — set `OPENAI_BASE_URL` to your endpoint.
@@ -779,11 +770,7 @@ ATLASCLOUD_IMAGE_MODEL=openai/gpt-image-2/text-to-image
 # Google Gemini (alternative, free)
 GOOGLE_API_KEY=your-key
 GOOGLE_BASE_URL=                            # optional custom Gemini-compatible endpoint
-<<<<<<< HEAD
-GOOGLE_VLM_MODEL=gemini-3-flash-preview          # override Gemini VLM model
-=======
 GOOGLE_VLM_MODEL=gemini-2.5-flash          # override Gemini VLM model
->>>>>>> upstream/main
 GOOGLE_IMAGE_MODEL=gemini-3-pro-image-preview  # override Gemini image model
 ```
 

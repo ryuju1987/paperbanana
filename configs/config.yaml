@@ -4,11 +4,7 @@
 # Provider settings
 vlm:
   provider: gemini
-<<<<<<< HEAD
-  model: gemini-3-flash-preview
-=======
   model: gemini-2.5-flash
->>>>>>> upstream/main
 
 image:
   provider: google_imagen

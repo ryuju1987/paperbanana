@@ -124,7 +124,6 @@ class ReferenceExample(BaseModel):
     structure_hints: Optional[dict[str, Any] | list[Any] | str] = None
 
 
-<<<<<<< HEAD
 class AxisScore(BaseModel):
     """Structured score for a single evaluation axis (Harness Design rubric)."""
 
@@ -169,7 +168,6 @@ class CritiqueRubric(BaseModel):
         ]
         return sum(scores) / len(scores) if scores else None
 
-=======
 class TestCase(BaseModel):
     """A single entry from the official PaperBananaBench test split.
 
@@ -201,7 +199,6 @@ class TestCase(BaseModel):
         default=None, description="Official difficulty label (plot entries only)"
     )
 
->>>>>>> upstream/main
 
 class CritiqueResult(BaseModel):
     """Output from the Critic agent."""

@@ -37,11 +37,7 @@ class GeminiVLM(VLMProvider):
     def __init__(
         self,
         api_key: Optional[str] = None,
-<<<<<<< HEAD
-        model: str = "gemini-3-flash-preview",
-=======
         model: str = "gemini-2.5-flash",
->>>>>>> upstream/main
         base_url: Optional[str] = None,
     ):
         self._api_key = api_key
